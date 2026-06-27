@@ -40,7 +40,7 @@ const { createEventBus } = await import(`${DIST}/core/event-bus.js`);
 const { CustomMessageComponent } = await import(`${DIST}/modes/interactive/components/custom-message.js`);
 const { initTheme } = await import(`${DIST}/modes/interactive/theme/theme.js`);
 
-// advisor.ts has @mariozechner/* value imports; reach its exported pure helpers
+// advisor.ts has @earendil-works/* value imports; reach its exported pure helpers
 // through jiti with the same aliases pi's extension loader uses.
 const piRequire = createRequire(`${DIST}/index.js`);
 const jitiDir = dirname(piRequire.resolve("jiti/package.json"));
@@ -48,13 +48,9 @@ const { createJiti } = await import(`${jitiDir}/lib/jiti-static.mjs`);
 const pkgEntry = (pkg) => resolve(DIST, "..", "node_modules", "@earendil-works", pkg, "dist/index.js");
 const ALIAS = {
 	"@earendil-works/pi-coding-agent": `${DIST}/index.js`,
-	"@mariozechner/pi-coding-agent": `${DIST}/index.js`,
 	"@earendil-works/pi-agent-core": pkgEntry("pi-agent-core"),
-	"@mariozechner/pi-agent-core": pkgEntry("pi-agent-core"),
 	"@earendil-works/pi-tui": pkgEntry("pi-tui"),
-	"@mariozechner/pi-tui": pkgEntry("pi-tui"),
 	"@earendil-works/pi-ai": pkgEntry("pi-ai"),
-	"@mariozechner/pi-ai": pkgEntry("pi-ai"),
 	typebox: resolve(DIST, "..", "node_modules", "typebox", "build", "index.mjs"),
 };
 const jiti = createJiti(import.meta.url, { moduleCache: false, alias: ALIAS });

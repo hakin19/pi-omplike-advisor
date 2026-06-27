@@ -37,11 +37,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { Agent, type AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { AssistantMessage, Model, ToolResultMessage } from "@mariozechner/pi-ai";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { convertToLlm, createReadOnlyTools } from "@mariozechner/pi-coding-agent";
-import { Container, Text } from "@mariozechner/pi-tui";
+import { Agent, type AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { AssistantMessage, Model, ToolResultMessage } from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, createReadOnlyTools } from "@earendil-works/pi-coding-agent";
+import { Container, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import { resolveModelAndThinking } from "./lib/mode-utils.js";
@@ -333,7 +333,7 @@ function buildAdvisorAgent(opts: {
 		},
 		convertToLlm,
 		// Use the bundled default streamFn (pi-agent-core's own streamSimple); we
-		// only supply auth. The `@mariozechner/pi-ai` extension surface does not
+		// only supply auth. The `@earendil-works/pi-ai` extension surface does not
 		// expose streamSimple, so a custom streamFn is not an option here.
 		getApiKey: (provider: string) => opts.modelRegistry.getApiKeyForProvider(provider),
 	});
