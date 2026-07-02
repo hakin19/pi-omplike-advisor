@@ -577,11 +577,19 @@ function buildIntegration({ onReview } = {}) {
 	const delivered = [];
 	let rt;
 	let reviewCount = 0;
+	// mirrors the extension's currentTurnTerminal flag (set by block() below, the
+	// way turn_end sets it before running the catch-up block).
+	const state = { terminal: false };
 	const tool = new A.AdviseTool((note, severity) => {
 		// mirrors deliverAdvice: drop stale (orphaned review), hold high severity,
-		// treat a nit matching a held note as a reconfirmation, else deliver the nit.
+		// hold a lagging-review nit on a terminal turn, treat a nit matching a held
+		// note as a reconfirmation, else deliver the nit.
 		if (rt && !rt.acceptingAdvice) return true;
 		if (A.isHighSeverity(severity)) {
+			rt.hold(note, severity);
+			return false;
+		}
+		if (state.terminal && rt.reviewLagging) {
 			rt.hold(note, severity);
 			return false;
 		}
@@ -621,8 +629,10 @@ function buildIntegration({ onReview } = {}) {
 			tool.markDelivered(n.note, n.severity);
 		}
 	};
-	const block = (terminal, opts = {}) =>
-		A.runTurnBlock({ terminal, runtime: rt, consecutiveBlocks: 0, notify: () => {}, deliverHeld, ...opts });
+	const block = (terminal, opts = {}) => {
+		state.terminal = terminal;
+		return A.runTurnBlock({ terminal, runtime: rt, consecutiveBlocks: 0, notify: () => {}, deliverHeld, ...opts });
+	};
 	return { rt, tool, delivered, deliverHeld, block, getReviewCount: () => reviewCount };
 }
 
@@ -639,6 +649,56 @@ test("integration: a nit is delivered during review, not held, never blocks", as
 	assert.equal(h.rt.hasHeld, false);
 	assert.equal(h.delivered.length, 1);
 	assert.equal(h.delivered[0].kind, "nit");
+});
+
+test("integration: terminal turn — a nit from the lagging previous-turn review is held, reconfirmed by the final turn's review, then delivered", async () => {
+	const h = buildIntegration({
+		onReview: async (text, { tool, reviewCount }) => {
+			if (reviewCount === 1) {
+				// review of turn 1, emitted while the terminal turn 2 is already queued
+				await tool.execute("n1", { note: "rename var", severity: "nit" });
+			} else if (reviewCount === 2) {
+				assert.match(text, /Held advisories/, "the held nit rides the final turn's reconfirm preamble");
+				assert.match(text, /\[NIT\] rename var/);
+				await tool.execute("n2", { note: "rename var", severity: "nit" }); // still applies
+			}
+		},
+	});
+	// Review 1 lags: turn 2's delta is queued before review 1 (deferred prompt) runs.
+	h.rt.push("turn 1");
+	h.rt.push("final turn");
+	assert.equal(await h.block(true), 0);
+	assert.equal(h.getReviewCount(), 2);
+	assert.deepEqual(h.delivered, [{ note: "rename var", severity: "nit", kind: "held" }], "nit waits for the final turn's review, then lands as held");
+	assert.equal(h.rt.hasHeld, false);
+});
+
+test("integration: terminal turn — a lagging-review nit the final turn's review does NOT re-raise is dropped", async () => {
+	const h = buildIntegration({
+		onReview: async (_text, { tool, reviewCount }) => {
+			if (reviewCount === 1) await tool.execute("n1", { note: "rename var", severity: "nit" });
+			// review 2 (the final turn's) stays silent → the nit was addressed/superseded
+		},
+	});
+	h.rt.push("turn 1");
+	h.rt.push("final turn");
+	assert.equal(await h.block(true), 0);
+	assert.equal(h.getReviewCount(), 2);
+	assert.equal(h.delivered.length, 0, "stale previous-turn nit is dropped, not steered after the final answer");
+	assert.equal(h.rt.hasHeld, false);
+});
+
+test("integration: terminal turn — a nit from the final turn's OWN review still delivers immediately", async () => {
+	const h = buildIntegration({
+		onReview: async (_text, { tool, reviewCount }) => {
+			if (reviewCount === 1) await tool.execute("n1", { note: "rename var", severity: "nit" });
+		},
+	});
+	h.rt.push("final turn"); // advisor idle → the review includes the final turn (not lagging)
+	assert.equal(await h.block(true), 0);
+	assert.equal(h.getReviewCount(), 1);
+	assert.deepEqual(h.delivered, [{ note: "rename var", severity: "nit", kind: "nit" }]);
+	assert.equal(h.rt.hasHeld, false);
 });
 
 test("integration: blocker held on turn 1, survives reconfirm, delivered after terminal block", async () => {

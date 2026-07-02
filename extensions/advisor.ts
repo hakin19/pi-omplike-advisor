@@ -13,6 +13,10 @@
  *
  *   nit      → delivered immediately (steer + triggerTurn), tagged as raised
  *              about an earlier step. Low-stakes; mild staleness is fine.
+ *              Exception: on a terminal turn, a nit from a review that LAGS the
+ *              final turn (newer deltas still queued) is held like a concern —
+ *              the final turn's review reconfirms it — so the user's final
+ *              answer isn't chased by stale nits about superseded work.
  *   concern  → ALWAYS held, never steered on first emission.
  *   blocker  → ALWAYS held, never steered on first emission.
  *
@@ -545,7 +549,18 @@ export class AdvisorRuntime {
 	}
 
 	/**
-	 * Stash a high-severity note for reconfirmation. It rides the next review as a
+	 * True while newer deltas are queued behind the in-flight review — i.e. the
+	 * review currently emitting advice predates the latest pushed turn. Advise
+	 * callbacks only fire during a review, so from inside one this exactly means
+	 * "this advice is about an EARLIER turn, not the latest one".
+	 */
+	get reviewLagging(): boolean {
+		return this.#pending.length > 0;
+	}
+
+	/**
+	 * Stash a note for reconfirmation (high severity always; also a nit raised by a
+	 * lagging review on a terminal turn). It rides the next review as a
 	 * reconfirm preamble (see `#drain`); survivors are taken via `takeHeld()` and
 	 * steered in by the catch-up block once the advisor settles. Deduped by note
 	 * text so re-raising during a reconfirm doesn't pile up duplicates; the re-raise
@@ -970,7 +985,8 @@ Cite the exact instruction or risk.
   - Produce something fundamentally unsound.
 - Verify thoroughly before raising.
 
-concern/blocker are held and reconfirmed before they reach the agent: you may be
+concern/blocker (and occasionally a nit you raised just as the agent was
+finishing) are held and reconfirmed before they reach the agent: you may be
 shown your held advisories again alongside newer activity. Re-raise EACH that still
 applies (same severity, or higher if it's gotten worse — never lower) — this is not a
 repeat, and re-raising several is fine here. Stay silent on any the agent has since
@@ -1080,6 +1096,18 @@ export default function (pi: ExtensionAPI) {
 			// block deliver it (against unraced state) only if it still applies.
 			dbg("deliverAdvice hold", severity, JSON.stringify(note).slice(0, 120));
 			runtime?.hold(note, severity);
+			return false;
+		}
+
+		// On a terminal turn, a nit from a review that LAGS the final turn (newer
+		// deltas are still queued, so the advisor hasn't seen the final turn yet) is
+		// held like a concern/blocker instead of steered: it was raised about a
+		// PREVIOUS turn's state, and the final turn may have already addressed it.
+		// It rides the final turn's review as a reconfirm preamble; the catch-up
+		// block (already stalling this terminal turn) delivers the survivors.
+		if (currentTurnTerminal && runtime?.reviewLagging) {
+			dbg("deliverAdvice hold (terminal, lagging review nit)", JSON.stringify(note).slice(0, 120));
+			runtime.hold(note, severity);
 			return false;
 		}
 
