@@ -24,7 +24,7 @@
 
 import assert from "node:assert/strict";
 import { spawn, execSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -33,7 +33,9 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PI_BIN = execSync("command -v pi").toString().trim();
-const DIST = dirname(execSync(`readlink -f ${PI_BIN}`).toString().trim());
+// PI_DIST overrides bin-based resolution (needed when `pi` is a wrapper script
+// rather than a symlink into the install, e.g. pointing at a pi-mono checkout).
+const DIST = process.env.PI_DIST ?? dirname(execSync(`readlink -f ${PI_BIN}`).toString().trim());
 
 const { createExtensionRuntime, loadExtensions } = await import(`${DIST}/core/extensions/loader.js`);
 const { createEventBus } = await import(`${DIST}/core/event-bus.js`);
@@ -45,13 +47,18 @@ const { initTheme } = await import(`${DIST}/modes/interactive/theme/theme.js`);
 const piRequire = createRequire(`${DIST}/index.js`);
 const jitiDir = dirname(piRequire.resolve("jiti/package.json"));
 const { createJiti } = await import(`${jitiDir}/lib/jiti-static.mjs`);
-const pkgEntry = (pkg) => resolve(DIST, "..", "node_modules", "@earendil-works", pkg, "dist/index.js");
+// node_modules sits beside dist in an npm install, but is hoisted to the repo
+// root in a pi-mono checkout — probe both.
+const NM = [resolve(DIST, "..", "node_modules"), resolve(DIST, "..", "..", "..", "node_modules")].find((d) =>
+	existsSync(join(d, "@earendil-works")),
+);
+const pkgEntry = (pkg) => resolve(NM, "@earendil-works", pkg, "dist/index.js");
 const ALIAS = {
 	"@earendil-works/pi-coding-agent": `${DIST}/index.js`,
 	"@earendil-works/pi-agent-core": pkgEntry("pi-agent-core"),
 	"@earendil-works/pi-tui": pkgEntry("pi-tui"),
 	"@earendil-works/pi-ai": pkgEntry("pi-ai"),
-	typebox: resolve(DIST, "..", "node_modules", "typebox", "build", "index.mjs"),
+	typebox: resolve(NM, "typebox", "build", "index.mjs"),
 };
 const jiti = createJiti(import.meta.url, { moduleCache: false, alias: ALIAS });
 const A = await jiti.import(resolve(HERE, "advisor.ts"));
@@ -475,6 +482,9 @@ function stubRuntime({ held = [], settleResult = "settled" } = {}) {
 		takeHeld() {
 			return this._held.splice(0);
 		},
+		hold(note, severity) {
+			this._held.push({ note, severity });
+		},
 		async waitUntilSettled() {
 			this.waited = true;
 			return settleResult;
@@ -535,7 +545,7 @@ test("runTurnBlock: passes { terminal } through to deliverHeld (settled + timeou
 	// non-terminal + settled → { terminal: false }
 	await A.runTurnBlock(blockArgs({ terminal: false, runtime: stubRuntime({ held: [{ note: "b" }], settleResult: "settled" }), deliverHeld: record }));
 	// terminal + timeout (best-effort) → { terminal: true }
-	await A.runTurnBlock(blockArgs({ terminal: true, runtime: stubRuntime({ held: [{ note: "c" }], settleResult: "timeout" }), deliverHeld: record }));
+	await A.runTurnBlock(blockArgs({ terminal: true, runtime: stubRuntime({ held: [{ note: "c", severity: "concern" }], settleResult: "timeout" }), deliverHeld: record })); // high-sev: a nit would stay held
 
 	assert.equal(calls.length, 3);
 	assert.equal(calls[0].opts?.terminal, true, "terminal settled → terminal:true");
@@ -571,6 +581,18 @@ test("runTurnBlock: terminal + failed reconfirm → best-effort delivers", async
 	assert.deepEqual(delivered, [{ note: "x", severity: "concern" }], "last chance before idle → deliver best-effort");
 });
 
+test("runTurnBlock: terminal + timeout → only concerns/blockers ship best-effort; nits stay held", async () => {
+	const delivered = [];
+	const rt = stubRuntime({
+		held: [{ note: "x", severity: "concern" }, { note: "y", severity: "nit" }],
+		settleResult: "timeout",
+	});
+	const n = await A.runTurnBlock(blockArgs({ terminal: true, runtime: rt, deliverHeld: (x) => delivered.push(...x) }));
+	assert.equal(n, 0);
+	assert.deepEqual(delivered, [{ note: "x", severity: "concern" }], "only high severity is worth an unconfirmed delivery");
+	assert.deepEqual(rt._held, [{ note: "y", severity: "nit" }], "unconfirmed nit is re-held, not steered after the final answer");
+});
+
 // --- real AdvisorRuntime + stub Agent: hold → reconfirm → deliver/drop ---
 // onReview(text, {tool, rt, reviewCount}) simulates the advisor's reaction per review.
 function buildIntegration({ onReview } = {}) {
@@ -582,18 +604,18 @@ function buildIntegration({ onReview } = {}) {
 	const state = { terminal: false };
 	const tool = new A.AdviseTool((note, severity) => {
 		// mirrors deliverAdvice: drop stale (orphaned review), hold high severity,
-		// hold a lagging-review nit on a terminal turn, treat a nit matching a held
-		// note as a reconfirmation, else deliver the nit.
+		// hold any nit raised while stopped at a terminal turn, treat a nit matching
+		// a held note as a reconfirmation (held, not recorded), else deliver the nit.
 		if (rt && !rt.acceptingAdvice) return true;
 		if (A.isHighSeverity(severity)) {
 			rt.hold(note, severity);
 			return false;
 		}
-		if (state.terminal && rt.reviewLagging) {
+		if (state.terminal && !rt.idle) {
 			rt.hold(note, severity);
 			return false;
 		}
-		if (rt.reconfirmIfHeld(note)) return true;
+		if (rt.reconfirmIfHeld(note)) return false;
 		delivered.push({ note, severity, kind: "nit" });
 		return true;
 	});
@@ -688,17 +710,46 @@ test("integration: terminal turn — a lagging-review nit the final turn's revie
 	assert.equal(h.rt.hasHeld, false);
 });
 
-test("integration: terminal turn — a nit from the final turn's OWN review still delivers immediately", async () => {
+test("integration: terminal turn — a nit from the final turn's OWN review lands at settle (no mid-review steer)", async () => {
 	const h = buildIntegration({
 		onReview: async (_text, { tool, reviewCount }) => {
 			if (reviewCount === 1) await tool.execute("n1", { note: "rename var", severity: "nit" });
 		},
 	});
-	h.rt.push("final turn"); // advisor idle → the review includes the final turn (not lagging)
+	h.rt.push("final turn"); // advisor idle → the review includes the final turn (current, no reconfirm needed)
 	assert.equal(await h.block(true), 0);
-	assert.equal(h.getReviewCount(), 1);
-	assert.deepEqual(h.delivered, [{ note: "rename var", severity: "nit", kind: "nit" }]);
+	assert.equal(h.getReviewCount(), 1, "no extra reconfirm review — the nit skips the prune and waits for settle");
+	assert.deepEqual(h.delivered, [{ note: "rename var", severity: "nit", kind: "held" }]);
 	assert.equal(h.rt.hasHeld, false);
+});
+
+test("integration (regression): a reconfirm-as-nit followed by a provider error survives the retry (no premature dedup)", async () => {
+	// The de-escalating reconfirm (held blocker re-raised as a nit) must be
+	// reported as HELD, not recorded as delivered: if the review then errors and
+	// is retried, a recorded nit would be duplicate-dropped on the retry before it
+	// can re-reconfirm, and the successful retry's prune would silently lose the
+	// held blocker.
+	const h = buildIntegration({
+		onReview: async (_text, { tool, reviewCount }) => {
+			if (reviewCount === 1) {
+				await tool.execute("a1", { note: "off-by-one", severity: "blocker" });
+			} else if (reviewCount === 2) {
+				await tool.execute("a2", { note: "off-by-one", severity: "nit" }); // de-escalating reconfirm…
+				throw new Error("provider blip"); // …then the review errors → retried
+			} else if (reviewCount === 3) {
+				await tool.execute("a3", { note: "off-by-one", severity: "nit" }); // retry must NOT be duplicate-dropped
+			}
+		},
+	});
+	h.rt.push("turn 1");
+	await h.block(false);
+	await h.rt.waitUntilSettled(5000);
+	assert.equal(h.rt.hasHeld, true);
+	h.rt.push("turn 2"); // NON-terminal, so the reconfirmIfHeld path (not the terminal hold) is exercised
+	assert.equal(await h.block(false), 0);
+	assert.equal(h.getReviewCount(), 3);
+	assert.equal(h.delivered.length, 1, "held blocker survives the errored reconfirm's retry");
+	assert.equal(h.delivered[0].severity, "blocker");
 });
 
 test("integration: blocker held on turn 1, survives reconfirm, delivered after terminal block", async () => {

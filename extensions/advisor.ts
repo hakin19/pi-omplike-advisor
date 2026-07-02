@@ -13,10 +13,14 @@
  *
  *   nit      → delivered immediately (steer + triggerTurn), tagged as raised
  *              about an earlier step. Low-stakes; mild staleness is fine.
- *              Exception: on a terminal turn, a nit from a review that LAGS the
- *              final turn (newer deltas still queued) is held like a concern —
- *              the final turn's review reconfirms it — so the user's final
- *              answer isn't chased by stale nits about superseded work.
+ *              Exception: once the primary stops at a terminal turn, nits are
+ *              held too (advise callbacks only fire while a review is in
+ *              flight): one from a review LAGGING the final turn rides the
+ *              final review's reconfirm preamble and must survive it; one from
+ *              the final turn's own review just waits for settle. Either way
+ *              the final answer is never chased by a nit steered mid-review,
+ *              and the terminal best-effort path ships only concerns/blockers
+ *              (an unconfirmed nit is what holding was meant to keep away).
  *   concern  → ALWAYS held, never steered on first emission.
  *   blocker  → ALWAYS held, never steered on first emission.
  *
@@ -110,6 +114,7 @@ export function isTerminalTurn(message: { content?: ReadonlyArray<{ type: string
 export interface TurnBlockRuntime {
 	readonly hasHeld: boolean;
 	takeHeld(): AdvisorNote[];
+	hold(note: string, severity?: AdvisorSeverity): void;
 	waitUntilSettled(timeoutMs: number, signal?: AbortSignal): Promise<"settled" | "timeout" | "aborted" | "failed">;
 }
 
@@ -124,9 +129,14 @@ export interface TurnBlockRuntime {
  *                  notes and lengthen the next wait (return consecutiveBlocks+1).
  * - On settle: steer in whatever survived reconfirmation (may be empty), reset streak.
  * - On timeout / failed reconfirm (advisor errored out): non-terminal keeps the
- *   held notes and lengthens the next wait; terminal delivers best-effort (the
- *   agent did no follow-up — it stopped — so held notes are current, and it's the
- *   last chance before control returns to the user).
+ *   held notes and lengthens the next wait; terminal delivers concerns/blockers
+ *   best-effort (it's the last chance before control returns to the user, and
+ *   the stakes justify an unconfirmed delivery) but keeps NITS held — an
+ *   unconfirmed nit chasing the final answer is exactly what holding it was
+ *   meant to prevent, and if the session continues it rides the next reconfirm.
+ *   (For a note first raised about the final turn itself the note is current —
+ *   the agent did no follow-up — but a lagging previous-turn nit is not
+ *   distinguishable here, so nits uniformly stay held.)
  * - On abort (user hit Escape): bail, keep held notes + streak.
  */
 export async function runTurnBlock(opts: {
@@ -163,9 +173,14 @@ export async function runTurnBlock(opts: {
 	// timeout OR failed (advisor errored 3x and dropped the reconfirm). Either way
 	// the held notes are NOT confirmed.
 	if (terminal) {
+		// Best-effort only for concerns/blockers. Unconfirmed nits are re-held: they
+		// aren't worth chasing the final answer with, and they ride the next
+		// reconfirm preamble if the user continues the session.
 		const held = runtime.takeHeld();
-		if (held.length) {
-			opts.deliverHeld(held, { terminal: true });
+		const high = held.filter((n) => isHighSeverity(n.severity));
+		for (const n of held) if (!isHighSeverity(n.severity)) runtime.hold(n.note, n.severity);
+		if (high.length) {
+			opts.deliverHeld(high, { terminal: true });
 			opts.notify("advisor didn't reconfirm in time; delivering held advice anyway");
 		}
 		return 0;
@@ -543,24 +558,14 @@ export class AdvisorRuntime {
 		return !this.#busy && this.#pending.length === 0;
 	}
 
-	/** Whether any high-severity note is currently held awaiting reconfirmation. */
+	/** Whether any note is currently held awaiting reconfirmation/settle. */
 	get hasHeld(): boolean {
 		return this.#held.length > 0;
 	}
 
 	/**
-	 * True while newer deltas are queued behind the in-flight review — i.e. the
-	 * review currently emitting advice predates the latest pushed turn. Advise
-	 * callbacks only fire during a review, so from inside one this exactly means
-	 * "this advice is about an EARLIER turn, not the latest one".
-	 */
-	get reviewLagging(): boolean {
-		return this.#pending.length > 0;
-	}
-
-	/**
-	 * Stash a note for reconfirmation (high severity always; also a nit raised by a
-	 * lagging review on a terminal turn). It rides the next review as a
+	 * Stash a note for reconfirmation (high severity always; also any nit raised
+	 * while the primary is stopped at a terminal turn). It rides the next review as a
 	 * reconfirm preamble (see `#drain`); survivors are taken via `takeHeld()` and
 	 * steered in by the catch-up block once the advisor settles. Deduped by note
 	 * text so re-raising during a reconfirm doesn't pile up duplicates; the re-raise
@@ -1099,24 +1104,31 @@ export default function (pi: ExtensionAPI) {
 			return false;
 		}
 
-		// On a terminal turn, a nit from a review that LAGS the final turn (newer
-		// deltas are still queued, so the advisor hasn't seen the final turn yet) is
-		// held like a concern/blocker instead of steered: it was raised about a
-		// PREVIOUS turn's state, and the final turn may have already addressed it.
-		// It rides the final turn's review as a reconfirm preamble; the catch-up
-		// block (already stalling this terminal turn) delivers the survivors.
-		if (currentTurnTerminal && runtime?.reviewLagging) {
-			dbg("deliverAdvice hold (terminal, lagging review nit)", JSON.stringify(note).slice(0, 120));
+		// Once the primary has stopped at a terminal turn, hold nits too instead of
+		// steering them mid-review. Advise callbacks only fire while a review is in
+		// flight (!idle), and any such review either LAGS the final turn — its nit is
+		// about a PREVIOUS turn's state the final turn may have addressed, so it must
+		// survive the final review's reconfirm preamble (this also covers the window
+		// where turn_end has set the flag but not yet pushed the final delta, when
+		// #pending can't tell the review is lagging) — or IS the final turn's review,
+		// whose nit is current and simply waits for settle: it skips the prune (it
+		// wasn't in the offered snapshot) and the terminal catch-up block delivers it.
+		if (currentTurnTerminal && runtime && !runtime.idle) {
+			dbg("deliverAdvice hold (terminal-turn nit)", JSON.stringify(note).slice(0, 120));
 			runtime.hold(note, severity);
 			return false;
 		}
 
 		// A nit whose text matches a held high-severity note is a de-escalation the
 		// prompt forbids; treat it as a reconfirmation (keep the held note at its
-		// severity) instead of shipping a nit and pruning the blocker.
+		// severity) instead of shipping a nit and pruning the blocker. Report it as
+		// HELD (false), not delivered: recording it in the dedup map here would let a
+		// retry of this review (after a provider error) get duplicate-dropped before
+		// it can re-reconfirm, silently pruning the held note on the retry's success.
+		// The dedup record is written at the real delivery point (deliverHeld).
 		if (runtime?.reconfirmIfHeld(note)) {
 			dbg("nit reconfirms a held note; keeping it held", JSON.stringify(note).slice(0, 120));
-			return true;
+			return false;
 		}
 
 		// nit: deliver now, tagged as raised about an earlier step. triggerTurn wakes

@@ -17,6 +17,12 @@ Advice is emitted at three severities, with different delivery semantics:
 
 - **nit** — delivered immediately (steered in and wakes an idle agent), tagged
   as raised about an earlier step. Low-stakes; mild staleness is fine.
+  Exception: once the primary stops at a terminal turn, nits are held too and
+  land when the advisor settles — a nit from a review lagging the final turn
+  must survive the final review's reconfirmation — so the final answer is never
+  chased by a stale nit about already-superseded work. If the advisor can't
+  reconfirm in time, only concerns/blockers ship best-effort; unconfirmed nits
+  stay held for a later reconfirm.
 - **concern** / **blocker** — always held on first emission, never steered
   immediately. Because review is asynchronous (seconds), high-severity advice is
   usually stale by the time it could land, so it is held and re-confirmed by the
@@ -125,3 +131,7 @@ node packages/pi-omplike-advisor/extensions/advisor.test.mjs
 # also run the live pi E2E harness (needs anthropic auth + network)
 ADVISOR_E2E=1 node packages/pi-omplike-advisor/extensions/advisor.test.mjs
 ```
+
+The harness locates pi via `readlink -f $(command -v pi)`; if your `pi` is a
+wrapper script instead of a symlink, point `PI_DIST` at the install's `dist/`
+directory (e.g. `PI_DIST=~/src/pi-mono/packages/coding-agent/dist`).
