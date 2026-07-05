@@ -274,9 +274,10 @@ const escapeXml = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, 
  * Render notes as the agent-facing message body: one `<advisory>` per note.
  * `stale` adds a `context` attribute noting the advice is about an earlier step
  * (used for nits, which the advisor always raises a little behind the agent).
- * `finalAnswer` appends guidance for advice that arrives AFTER the agent had
- * already returned a final answer this turn (a terminal/stop turn): if the agent
- * acts on it, it should reply with a fresh, self-contained final answer rather
+ * `finalAnswer` appends guidance for advice delivered as a followup to a terminal
+ * message: at the moment it is steered in, the primary is stopped having returned
+ * a final answer this turn — regardless of which turn generated the note. If the
+ * agent acts on it, it should reply with a fresh, self-contained final answer rather
  * than a terse follow-up — so the user reads one complete answer, not a
  * back-and-forth thread it has to stitch together.
  */
@@ -1144,9 +1145,16 @@ export default function (pi: ExtensionAPI) {
 	// ---- steer held survivors into the primary (called by the catch-up block) ----
 	function deliverHeld(notes: AdvisorNote[], opts?: { terminal?: boolean }): void {
 		if (handoffInProgress() || !notes.length) return;
+		// The self-contained-final-answer guidance is gated on whether this delivery is
+		// a followup to a terminal message — i.e. the primary is stopped at a final
+		// answer RIGHT NOW (the live currentTurnTerminal flag), not on which turn
+		// generated the note. A note held from an earlier turn still restates iff it
+		// lands on a stopped/terminal primary. (opts.terminal — the turn that triggered
+		// this block — equals currentTurnTerminal at every call site today, but keying
+		// off the live flag keeps generation-time out of the decision by construction.)
 		for (const n of notes) {
 			dbg("deliverHeld", n.severity, JSON.stringify(n.note).slice(0, 120));
-			const content = formatAdvisoryContent([n], { finalAnswer: !!opts?.terminal });
+			const content = formatAdvisoryContent([n], { finalAnswer: currentTurnTerminal });
 			pi.sendMessage({ customType: ADVISORY_TYPE, content, display: true, details: { notes: [n] } }, { deliverAs: "steer", triggerTurn: !autoResumeSuppressed });
 			// Record at the real delivery point (onAdvice→false never recorded it), so a
 			// later same-or-lower-severity repeat is deduped.
