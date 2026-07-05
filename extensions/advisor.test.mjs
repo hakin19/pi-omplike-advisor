@@ -535,8 +535,11 @@ test("runTurnBlock: terminal timeout → delivers held best-effort (current, not
 });
 
 test("runTurnBlock: passes { terminal } through to deliverHeld (settled + timeout paths)", async () => {
-	// The flag drives whether deliverHeld appends the self-contained-final-answer
-	// guidance, so it must be wired through both delivery sites.
+	// runTurnBlock must forward the turn's terminality to deliverHeld from both the
+	// settled and timeout paths. (deliverHeld itself now gates the self-contained-
+	// final-answer guidance on the live currentTurnTerminal flag, using this passed
+	// value only as a divergence-check invariant, so this test pins the passthrough
+	// contract, not the guidance decision.)
 	const calls = [];
 	const record = (notes, opts) => calls.push({ notes, opts });
 

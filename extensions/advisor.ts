@@ -1149,9 +1149,13 @@ export default function (pi: ExtensionAPI) {
 		// a followup to a terminal message — i.e. the primary is stopped at a final
 		// answer RIGHT NOW (the live currentTurnTerminal flag), not on which turn
 		// generated the note. A note held from an earlier turn still restates iff it
-		// lands on a stopped/terminal primary. (opts.terminal — the turn that triggered
-		// this block — equals currentTurnTerminal at every call site today, but keying
-		// off the live flag keeps generation-time out of the decision by construction.)
+		// lands on a stopped/terminal primary. opts.terminal — the turn that triggered
+		// this block — must equal currentTurnTerminal at every call site (runTurnBlock
+		// runs inside turn_end, which sets the flag before calling it); we key off the
+		// live flag so generation-time is out of the decision by construction, and
+		// assert the invariant so a future out-of-band caller can't silently diverge.
+		if (opts && opts.terminal !== undefined && opts.terminal !== currentTurnTerminal)
+			dbg("deliverHeld: opts.terminal diverged from live currentTurnTerminal", opts.terminal, currentTurnTerminal);
 		for (const n of notes) {
 			dbg("deliverHeld", n.severity, JSON.stringify(n.note).slice(0, 120));
 			const content = formatAdvisoryContent([n], { finalAnswer: currentTurnTerminal });
